@@ -237,6 +237,22 @@ def gaseste_cartela_google(query, consola=None):
         content = panel.text
         numere = extrage_numere(content)
 
+        # --- Detect closure status strictly by SPAN text on the panel ---
+        closure_status = "Open"
+        try:
+            if panel.find_elements(By.XPATH, ".//span[normalize-space()='Permanently closed']"):
+                closure_status = "Permanently closed"
+            elif panel.find_elements(By.XPATH, ".//span[normalize-space()='Temporarily closed']"):
+                closure_status = "Temporarily closed"
+            else:
+                # more permissive fallback in case of additional whitespace/symbols
+                if panel.find_elements(By.XPATH, ".//span[contains(normalize-space(.), 'Permanently closed')]"):
+                    closure_status = "Permanently closed"
+                elif panel.find_elements(By.XPATH, ".//span[contains(normalize-space(.), 'Temporarily closed')]"):
+                    closure_status = "Temporarily closed"
+        except:
+            pass
+
         # WEBSITE
         website = None
         try:
@@ -273,6 +289,20 @@ def gaseste_cartela_google(query, consola=None):
                 d.get(maps_href)
                 opened_maps = True
                 company_name_found = _extract_name_from_maps()
+
+                # If still "Open", try detecting closure spans on Maps page too
+                if closure_status == "Open":
+                    try:
+                        if d.find_elements(By.XPATH, "//span[normalize-space()='Permanently closed']"):
+                            closure_status = "Permanently closed"
+                        elif d.find_elements(By.XPATH, "//span[normalize-space()='Temporarily closed']"):
+                            closure_status = "Temporarily closed"
+                        elif d.find_elements(By.XPATH, "//span[contains(normalize-space(.), 'Permanently closed')]"):
+                            closure_status = "Permanently closed"
+                        elif d.find_elements(By.XPATH, "//span[contains(normalize-space(.), 'Temporarily closed')]"):
+                            closure_status = "Temporarily closed"
+                    except:
+                        pass
         except:
             pass
 
@@ -299,7 +329,8 @@ def gaseste_cartela_google(query, consola=None):
             "site": website,
             "facebook": facebook,
             "phones": numere,
-            "company_name_found": company_name_found
+            "company_name_found": company_name_found,
+            "closure_status": closure_status
         }
     except Exception as e:
         if consola:
@@ -454,11 +485,18 @@ def interfata():
                 phone_col = str(row.get("Phone(s)", "") or "")
                 nota = str(row.get("DQP Employee Note", "") or "")
 
-                # Initial phones -> canonical E.164 (no '+')
-                phones_initiale = set(
-                    n for n in (normalize_with_country_code(p.strip(), tara) for p in re.split(r'[;,]', phone_col or ''))
-                    if n
-                )
+                # Initial phones -> canonical E.164 (no '+'), strip any '(x/y)' suffixes
+                phones_initiale = set()
+                for p in re.split(r'[;,]', phone_col or ''):
+                    p = p.strip()
+                    if not p:
+                        continue
+                    p_curat = re.sub(r'\([^)]*\)', '', p).strip()
+                    if not p_curat:
+                        continue
+                    nrm = normalize_with_country_code(p_curat, tara)
+                    if nrm:
+                        phones_initiale.add(nrm)
 
                 consola.insert(tk.END, f"\n📦 [{idx}] {companie}:\n")
                 consola.see(tk.END)
@@ -508,7 +546,8 @@ def interfata():
                         "Unique Phones Found": "Google card not found",
                         "Google Phone(s)": "N/A",
                         "Facebook Phone(s)": "N/A",
-                        "Website Phone(s)": "N/A"
+                        "Website Phone(s)": "N/A",
+                        "Closure Status": "N/A"
                     })
                     continue
 
@@ -525,6 +564,7 @@ def interfata():
 
                 site = rezultat_valid.get("site")
                 facebook = rezultat_valid.get("facebook")
+                closure_status = rezultat_valid.get("closure_status", "N/A")
 
                 telefoane_site = "N/A"
                 if site:
@@ -554,11 +594,14 @@ def interfata():
 
                 # Additional = all found - already present - from note
                 numere_adaugate = toate_numerele - phones_initiale - numere_nota
-                text_aditional = ', '.join(sorted(_pretty_e164(n, tara) for n in numere_adaugate)) \
-                                 if numere_adaugate else "No additional phone found."
+                text_aditional = ', '.join(sorted(
+                    ('+' + n) if re.sub(r'\D', '', (country_codes.get(tara) or '')) and n.startswith(re.sub(r'\D','',(country_codes.get(tara) or ''))) else n
+                    for n in numere_adaugate
+                )) if numere_adaugate else "No additional phone found."
 
                 matched_name = (rezultat_valid.get("company_name_found") or "").strip() or "N/A"
                 consola.insert(tk.END, f"   🏷️ Matched Name: {matched_name}\n")
+                consola.insert(tk.END, f"   🏪 Closure Status: {closure_status}\n")
                 consola.insert(tk.END, f"   ➤ Additional phones: {text_aditional}\n")
                 consola.see(tk.END)
                 consola.update()
@@ -571,7 +614,8 @@ def interfata():
                     "Unique Phones Found": text_aditional,
                     "Google Phone(s)": telefoane_google,
                     "Facebook Phone(s)": telefoane_fb,
-                    "Website Phone(s)": telefoane_site
+                    "Website Phone(s)": telefoane_site,
+                    "Closure Status": closure_status
                 })
 
             rezultat_df = pd.DataFrame(rezultate)
