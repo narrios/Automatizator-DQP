@@ -1,5 +1,6 @@
 import json
 import os
+import random
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
@@ -11,166 +12,110 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 
 # === Load country phone codes safely ===
 try:
     with open("all_country_phone_codes.json", "r", encoding="utf-8") as f:
         country_codes = json.load(f)
-except Exception as e:
+except Exception:
     country_codes = {}
-    # vom afișa eroarea în UI la start
 
 # === Phone patterns and helpers ===
 PHONE_TEXT_RE = re.compile(r'\+?\d[\d\s\-\.\(\)\/]{6,}\d')
 PHONE_TEL_RE  = re.compile(r'href=["\']\s*tel:([+0-9\-\s\.\(\)\/]+)["\']', re.I)
 
-# --- Ban words around numbers that are NOT phones (global tax IDs, reg. numbers, banking, GDPR etc.)
+# --- Ban words around numbers that are NOT phones (tax IDs, banking, GDPR etc.)
 CONTEXT_BAN_RE = re.compile(
     r"""(?ix)
     \b(
-        # EU / generic
         vat|tva|vat\s*no|vat\s*nr|vat\s*id|vat\s*reg|intracommunautaire|
         fiscal\s*code|tax\s*id|tax\s*no|tin|ein|ssn|nid|
         reg(\.|istration)?\s*(no|nr|number)|company\s*reg|crn|brn|roc|uen|uen\s*no|
-        # Banking
         iban|swift|bic|bank\s*account|acct\s*no|account\s*no|
-        # GDPR / laws
         gdpr|regolamento\s*(ue|eu)|ue\s*n\.?|directive|2016\/679|
-        # DE/AT/CH
         ust\-?id|steuernummer|handelsreg|hrb|uid\-?nr|mwst|
-        # FR
         siren|siret|rcs|
-        # IT
         p\.?\s*iva|partita\s*iva|codice\s*fiscale|cf\b|
-        # ES/PT
         nif\b|cif\b|nie\b|nipc|nif\s*pt|
-        # RO/MO
         cui\b|ro[\s\-]?\d{2,}|idno|idnp|
-        # UK/IE
         company\s*no|companies\s*house|utr|vrn|pps\s*no|
-        # PL
         nip\b|regon|pesel|
-        # CZ/SK
         i[čc]o\b|i[čc]\s*dph|dic\b|ič\s*dph|
-        # HR/SI/RS/BA/ME/MK/AL
         oib\b|mbs\b|pi[bp]\b|jmbg|mbr|em[bj]g|nuiss|nuis|
-        # BG
         bulstat|eik\b|
-        # GR/CY
         afm\b|vat\s*cy|
-        # NL/BE/LU
         kvk|kbo|tva|tva\s*be|btw\s*nr|
-        # UA/BY/RU/KZ
         єдрпоу|едрпоу|edrpou|unp\b|инн\b|кпп\b|ogrn|ogrnip|okpo|bin\b|iin\b|
-        # TR
         vergi|tckn|vkn|
-        # IL
         ח\.פ|ע\.מ|מספר\s*עוסק|
-        # IN
         gstin|pan\b|tan\b|cin\b|udyam|
-        # PK/BD/LK/NP
         cnic|ntn|bin\b|
-        # CN/HK/TW
         uscc|brn|统一社会信用代码|統一編號|ubn\b|
-        # SG/MY/PH/ID/TH/VN
-        ssm|roc\s*my|uen|npwp|siret\s*id|tin\s*ph|bir\s*no|srn|brn\s*my|dti|
-        # AU/NZ
+        ssm|roc\s*my|uen|npwp|tin\s*ph|bir\s*no|srn|brn\s*my|dti|
         abn|acn|ird\s*no|gst\s*no|
-        # US/CA
         fein|ein|itin|ssn|sin|cra|bn\b|
-        # MX/Central/South America
         rfc\b|curp|rut\b|ruc\b|cuit|cuil|dni\b|cedula|nit\b|
-        # Africa / Middle East (examples)
         trn\b|cr\b|cac|\bbrn\b|cipc|ck\s*no
     )\b
     """,
     re.IGNORECASE
 )
 
-# Some numeric patterns often confused with phones (e.g., GDPR 2016/679, IBAN)
+# Things often confused with phones (e.g. GDPR 2016/679, IBAN)
 SUSPECT_PATTERN_RE = re.compile(
     r"""(?ix)
     (
-        \b20\d{2}/\d{2,4}\b |           # e.g., 2016/679 (GDPR), 2023/1234
-        \b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b # IBAN (approx.)
+        \b20\d{2}/\d{2,4}\b |
+        \b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b
     )
     """
 )
 
 def _cleanup_phone_str(s: str) -> str:
-    """Keep a leading '+' if present, remove all other non-digits/non-leading plus."""
     s = (s or "").strip()
-    s = re.sub(r'(?<!^)\+', '', s)       # internal '+' -> remove
-    s = re.sub(r'[^\d+]', '', s)         # keep only digits and a possible leading '+'
+    s = re.sub(r'(?<!^)\+', '', s)   # internal '+'
+    s = re.sub(r'[^\d+]', '', s)     # keep digits and leading '+'
     return s
 
 def _digits_count(s: str) -> int:
     return len(re.sub(r'\D', '', s or ''))
 
 def extrage_numere(text: str):
-    """
-    Extract phone-like strings from visible text, excluding
-    tax IDs / banking refs / GDPR refs in the nearby context.
-    Enforces 7..15 digits and removes IBAN/GDPR-like patterns.
-    """
     if not text:
         return []
-
     pattern = re.compile(r'\+?\d[\d\-\s\.\(\)\/]{6,}\d')
     results = []
-
     for m in pattern.finditer(text):
         raw = m.group(0).strip()
         dcnt = _digits_count(raw)
         if dcnt < 7 or dcnt > 15:
             continue
-
-        # context ~ 50 chars around the match
         start, end = m.start(), m.end()
-        left = max(0, start - 50)
-        right = min(len(text), end + 50)
-        ctx = text[left:right]
-
+        ctx = text[max(0, start-50): min(len(text), end+50)]
         if CONTEXT_BAN_RE.search(ctx):
             continue
         if SUSPECT_PATTERN_RE.search(ctx) or SUSPECT_PATTERN_RE.search(raw):
             continue
-
         results.append(_cleanup_phone_str(raw))
-
     return results
 
 def normalize_with_country_code(phone: str, country: str) -> str:
-    """
-    Return canonical phone for comparison/dedup in E.164 WITHOUT '+'.
-    Examples:
-      '+34 982 25 42 87' -> '34982254287'
-      '982 25 42 87' (ES) -> '34982254287'
-    """
     digits = re.sub(r'\D', '', phone or '')
     if not digits:
         return ''
-
     prefix = country_codes.get(country) or ''
     prefix_digits = re.sub(r'\D', '', prefix)
-
-    # 00 + country code
     if prefix_digits and digits.startswith('00' + prefix_digits):
-        return digits[2:]  # drop leading '00'
-
-    # already has country code
+        return digits[2:]
     if prefix_digits and digits.startswith(prefix_digits):
         return digits
-
-    # local/lacking country code -> prepend, drop trunk '0'
     if prefix_digits:
-        local = digits.lstrip('0')
-        return prefix_digits + local
-
+        return prefix_digits + digits.lstrip('0')
     return digits
 
 # === Lazy Chrome driver (prevents crash at import) ===
-driver = None  # will be created on-demand
+driver = None
 
 def ensure_driver(consola=None):
     global driver
@@ -182,75 +127,132 @@ def ensure_driver(consola=None):
         options.add_argument("--no-sandbox")
         options.add_argument("--lang=en")
         options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
         driver = uc.Chrome(options=options)
         return driver
     except Exception as e:
         msg = f"Nu pot porni browserul: {e}"
         if consola:
-            consola.insert(tk.END, "❌ " + msg + "\n")
-            consola.see(tk.END)
-            consola.update()
+            consola.insert(tk.END, "❌ " + msg + "\n"); consola.see(tk.END); consola.update()
         messagebox.showerror("Eroare Chrome", msg)
         return None
+
+# --- Consent helper + panel fallback ---
+def accept_google_consent(d):
+    try:
+        time.sleep(0.5)
+        iframes = d.find_elements(By.CSS_SELECTOR, "iframe[src*='consent']")
+        if iframes:
+            d.switch_to.frame(iframes[0])
+        xpaths = [
+            "//button[@id='L2AGLb']",
+            "//button[normalize-space()='I agree']",
+            "//button[contains(., 'Accept all')]",
+            "//button[contains(., 'Sunt de acord')]",
+            "//button[contains(., 'Acceptă tot')]",
+            "//button[contains(., 'Ich stimme zu')]",
+            "//button[contains(., 'Aceptar todo')]",
+        ]
+        for xp in xpaths:
+            btns = d.find_elements(By.XPATH, xp)
+            if btns:
+                try:
+                    btns[0].click()
+                except WebDriverException:
+                    d.execute_script("arguments[0].click();", btns[0])
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            d.switch_to.default_content()
+        except Exception:
+            pass
+
+def find_knowledge_panel(d, timeout=7):
+    wait = WebDriverWait(d, timeout)
+    selectors = {
+        "#rhs",
+        "div[role='complementary']",
+        "div[data-attrid='title']",
+    }
+    for sel in selectors:
+        try:
+            return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+        except TimeoutException:
+            continue
+    return None
 
 def gaseste_cartela_google(query, consola=None):
     d = ensure_driver(consola=consola)
     if d is None:
         return {"found": False}
 
-    d.get(f"https://www.google.com/search?q={query.replace(' ', '+')}")
-    wait = WebDriverWait(d, 10)
+    url = f"https://www.google.com/search?q={query.replace(' ', '+')}&hl=en&gl=us&pws=0"
+    d.get(url)
+    accept_google_consent(d)
+
+    # Detect “unusual traffic”
+    try:
+        page_text = d.find_element(By.TAG_NAME, "body").text[:4000].lower()
+        if "unusual traffic" in page_text or "/sorry/" in d.current_url:
+            if consola:
+                consola.insert(tk.END, "        ⚠️ Google a cerut verificare (captcha). Sar peste.\n")
+                consola.see(tk.END); consola.update()
+            return {"found": False}
+    except Exception:
+        pass
+
+    wait = WebDriverWait(d, 5)
 
     def _extract_name_from_maps():
         try:
             el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1.DUwDvf")))
             name = el.text.strip()
-            if name:
-                return name
-        except:
-            pass
+            if name: return name
+        except: pass
         try:
             el = d.find_element(By.CSS_SELECTOR, '[role="heading"][aria-level="1"]')
             name = el.text.strip()
-            if name:
-                return name
-        except:
-            pass
+            if name: return name
+        except: pass
         try:
             el = d.find_element(By.CSS_SELECTOR, 'div[data-attrid="title"] span')
             name = el.text.strip()
-            if name:
-                return name
-        except:
-            pass
+            if name: return name
+        except: pass
         try:
             meta = d.find_element(By.CSS_SELECTOR, 'meta[property="og:title"]')
-            name = meta.get_attribute("content").strip()
-            if name:
-                return name
-        except:
-            pass
+            name = (meta.get_attribute("content") or "").strip()
+            if name: return name
+        except: pass
         return "N/A"
 
     try:
-        panel = wait.until(EC.presence_of_element_located((By.ID, "rhs")))
+        panel = find_knowledge_panel(d, timeout=3)
+        if not panel:
+            if consola:
+                consola.insert(tk.END, "        ℹ️ Nu există knowledge panel pentru interogarea asta.\n")
+                consola.see(tk.END); consola.update()
+            return {"found": False}
+
         content = panel.text
         numere = extrage_numere(content)
 
-        # --- Detect closure status strictly by SPAN text on the panel ---
-        closure_status = "Open"
+        # --- Closure status strictly by SPANs on panel ---
+        closure_status = "Active"
         try:
             if panel.find_elements(By.XPATH, ".//span[normalize-space()='Permanently closed']"):
                 closure_status = "Permanently closed"
             elif panel.find_elements(By.XPATH, ".//span[normalize-space()='Temporarily closed']"):
                 closure_status = "Temporarily closed"
             else:
-                # more permissive fallback in case of additional whitespace/symbols
                 if panel.find_elements(By.XPATH, ".//span[contains(normalize-space(.), 'Permanently closed')]"):
                     closure_status = "Permanently closed"
                 elif panel.find_elements(By.XPATH, ".//span[contains(normalize-space(.), 'Temporarily closed')]"):
                     closure_status = "Temporarily closed"
-        except:
+        except Exception:
             pass
 
         # WEBSITE
@@ -258,28 +260,28 @@ def gaseste_cartela_google(query, consola=None):
         try:
             site_elem = panel.find_element(By.XPATH, ".//a[.//span[text()='Site'] or .//span[text()='Website']]")
             website = site_elem.get_attribute("href")
-        except:
+        except Exception:
             try:
                 links = panel.find_elements(By.XPATH, ".//a[contains(@href,'http')]")
                 for a in links:
                     href = a.get_attribute("href") or ""
-                    if "facebook.com" in href:
+                    if "facebook.com" in href: 
                         continue
                     if "google." in href or "support.google" in href or "/maps/" in href:
                         continue
                     website = href
                     break
-            except:
+            except Exception:
                 website = None
 
         # FACEBOOK
         try:
             fb_elem = panel.find_element(By.XPATH, ".//a[contains(@href,'facebook.com')]")
             facebook = fb_elem.get_attribute("href")
-        except:
+        except Exception:
             facebook = None
 
-        # Company name: open Maps if available
+        # Company name via Maps (if available)
         company_name_found = "N/A"
         opened_maps = False
         try:
@@ -290,7 +292,7 @@ def gaseste_cartela_google(query, consola=None):
                 opened_maps = True
                 company_name_found = _extract_name_from_maps()
 
-                # If still "Open", try detecting closure spans on Maps page too
+                # also try closure on Maps if still Open
                 if closure_status == "Open":
                     try:
                         if d.find_elements(By.XPATH, "//span[normalize-space()='Permanently closed']"):
@@ -301,27 +303,28 @@ def gaseste_cartela_google(query, consola=None):
                             closure_status = "Permanently closed"
                         elif d.find_elements(By.XPATH, "//span[contains(normalize-space(.), 'Temporarily closed')]"):
                             closure_status = "Temporarily closed"
-                    except:
+                    except Exception:
                         pass
-        except:
+        except Exception:
             pass
 
         if company_name_found == "N/A" and not opened_maps:
             try:
                 el = panel.find_element(By.CSS_SELECTOR, '[role="heading"]')
                 company_name_found = el.text.strip() or "N/A"
-            except:
+            except Exception:
                 try:
                     el = panel.find_element(By.CSS_SELECTOR, "div[data-attrid='title'] span")
                     company_name_found = el.text.strip() or "N/A"
-                except:
+                except Exception:
                     company_name_found = "N/A"
 
         if opened_maps:
             d.back()
+            accept_google_consent(d)
             try:
-                wait.until(EC.presence_of_element_located((By.ID, "rhs")))
-            except:
+                find_knowledge_panel(d, timeout=8)
+            except Exception:
                 pass
 
         return {
@@ -332,11 +335,14 @@ def gaseste_cartela_google(query, consola=None):
             "company_name_found": company_name_found,
             "closure_status": closure_status
         }
+    except TimeoutException:
+        if consola:
+            consola.insert(tk.END, "⏳ Timeout la găsirea panoului.\n"); consola.see(tk.END); consola.update()
+        return {"found": False}
     except Exception as e:
         if consola:
-            consola.insert(tk.END, f"   ❌ Panel error: {e}\n")
-            consola.see(tk.END)
-            consola.update()
+            consola.insert(tk.END, f"❌ Eroare la citirea panelului: {type(e).__name__}\n")
+            consola.see(tk.END); consola.update()
         return {"found": False}
 
 def extrage_numere_de_pe_pagina(url, consola=None):
@@ -345,22 +351,19 @@ def extrage_numere_de_pe_pagina(url, consola=None):
         return []
     try:
         d.get(url)
-        # small scroll to load footer/lazy content
-        time.sleep(1.5)
+        time.sleep(random.uniform(2, 5))
         d.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1.0)
+        time.sleep(random.uniform(1, 2))
 
         html = d.page_source
         try:
             text = d.find_element(By.TAG_NAME, "body").text
-        except:
+        except Exception:
             text = ''
 
         nums = set()
-        # 1) from visible text (context-filtered)
         for m in extrage_numere(text):
             nums.add(_cleanup_phone_str(m))
-        # 2) from tel: hrefs (length/suspect filters only)
         for m in PHONE_TEL_RE.findall(html):
             candidate = _cleanup_phone_str(m)
             if 7 <= _digits_count(candidate) <= 15 and not SUSPECT_PATTERN_RE.search(candidate):
@@ -369,24 +372,13 @@ def extrage_numere_de_pe_pagina(url, consola=None):
         return list(nums)
     except Exception as e:
         if consola:
-            consola.insert(tk.END, f"   ❌ Page parse error: {e}\n")
-            consola.see(tk.END)
-            consola.update()
+            consola.insert(tk.END, f"   ❌ Page parse error: {e}\n"); consola.see(tk.END); consola.update()
         return []
 
 def save_dataframe_safely(df: pd.DataFrame, default_name="rezultate_companii.xlsx", consola=None):
-    """
-    Save df safely:
-      1) try default name;
-      2) if locked, save with timestamp;
-      3) if still failing, open Save As…
-    """
     def _log(msg):
         if consola is not None:
-            consola.insert(tk.END, msg + "\n")
-            consola.see(tk.END)
-            consola.update()
-
+            consola.insert(tk.END, msg + "\n"); consola.see(tk.END); consola.update()
     try:
         with pd.ExcelWriter(default_name, engine="openpyxl") as writer:
             df.to_excel(writer, index=False)
@@ -417,7 +409,6 @@ def save_dataframe_safely(df: pd.DataFrame, default_name="rezultate_companii.xls
     if not path:
         _log("🛑 Save cancelled by user.")
         return None
-
     try:
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             df.to_excel(writer, index=False)
@@ -436,12 +427,11 @@ def interfata():
     filepath_var = tk.StringVar()
     stop_flag = tk.BooleanVar(value=False)
 
-    # if phone codes failed to load, show an error but allow UI to open
     if not country_codes:
         messagebox.showerror("Eroare",
             "Nu pot încărca all_country_phone_codes.json.\n"
             "Verifică fișierul și repornește aplicația.")
-    # Console
+
     global consola
     consola = scrolledtext.ScrolledText(root, width=120, height=30)
     consola.pack(padx=10, pady=10)
@@ -451,14 +441,12 @@ def interfata():
         if filepath:
             filepath_var.set(filepath)
             consola.insert(tk.END, f"Selected file: {filepath}\n")
-            consola.see(tk.END)
-            consola.update()
+            consola.see(tk.END); consola.update()
 
     def oprire():
         stop_flag.set(True)
         consola.insert(tk.END, "🛑 Stop requested. Finishing current company...\n")
-        consola.see(tk.END)
-        consola.update()
+        consola.see(tk.END); consola.update()
 
     def _pretty_e164(n: str, country: str) -> str:
         prefix_digits = re.sub(r'\D', '', (country_codes.get(country) or ''))
@@ -472,8 +460,7 @@ def interfata():
             for idx, (_, row) in enumerate(df.iterrows(), start=1):
                 if stop_flag.get():
                     consola.insert(tk.END, '\n🛑 Process was stopped by the user.\n')
-                    consola.see(tk.END)
-                    consola.update()
+                    consola.see(tk.END); consola.update()
                     break
 
                 companie = str(row["Company Name"])
@@ -485,7 +472,7 @@ def interfata():
                 phone_col = str(row.get("Phone(s)", "") or "")
                 nota = str(row.get("DQP Employee Note", "") or "")
 
-                # Initial phones -> canonical E.164 (no '+'), strip any '(x/y)' suffixes
+                # Initial phones -> canonical E.164 (no '+'), strip '(x/y)' notes
                 phones_initiale = set()
                 for p in re.split(r'[;,]', phone_col or ''):
                     p = p.strip()
@@ -499,8 +486,7 @@ def interfata():
                         phones_initiale.add(nrm)
 
                 consola.insert(tk.END, f"\n📦 [{idx}] {companie}:\n")
-                consola.see(tk.END)
-                consola.update()
+                consola.see(tk.END); consola.update()
 
                 variante_cautare = [
                     f"{companie} {adresa} {zip_code} {city} {tara}",
@@ -512,32 +498,20 @@ def interfata():
 
                 for query in variante_cautare:
                     consola.insert(tk.END, f"   🔍 Searching: {query}\n")
-                    consola.see(tk.END)
-                    consola.update()
+                    consola.see(tk.END); consola.update()
                     rezultat = gaseste_cartela_google(query, consola=consola)
                     if not rezultat.get("found"):
                         continue
 
-                    google_norm = set(
-                        n for n in (normalize_with_country_code(p, tara) for p in rezultat.get("phones", []))
-                        if n
-                    )
-
-                    if phones_initiale.intersection(google_norm):
-                        consola.insert(tk.END, "   ✅ Phone matched with Google card\n")
-                        consola.see(tk.END)
-                        consola.update()
-                        rezultat_valid = rezultat
-                        break
-                    else:
-                        consola.insert(tk.END, "   ⚠️ Google card found but phone did not match\n")
-                        consola.see(tk.END)
-                        consola.update()
+                    consola.insert(tk.END, "   ✅ Google card found\n")
+                    consola.see(tk.END)
+                    consola.update()
+                    rezultat_valid = rezultat
+                    break
 
                 if not rezultat_valid:
                     consola.insert(tk.END, "   ❌ No matching Google business card found\n")
-                    consola.see(tk.END)
-                    consola.update()
+                    consola.see(tk.END); consola.update()
                     rezultate.append({
                         "Company ID": id_link,
                         "Company Name": companie,
@@ -551,7 +525,7 @@ def interfata():
                     })
                     continue
 
-                # Collect phones from all sources (Google card + site + Facebook), normalized for dedup
+                # Collect phones from all sources
                 toate_numerele = set()
 
                 # Google phones
@@ -586,7 +560,7 @@ def interfata():
                             if n
                         )
 
-                # Numbers from employee note (normalize too)
+                # Numbers from employee note
                 numere_nota = set(
                     n for n in (normalize_with_country_code(x, tara) for x in extrage_numere(nota))
                     if n
@@ -594,17 +568,14 @@ def interfata():
 
                 # Additional = all found - already present - from note
                 numere_adaugate = toate_numerele - phones_initiale - numere_nota
-                text_aditional = ', '.join(sorted(
-                    ('+' + n) if re.sub(r'\D', '', (country_codes.get(tara) or '')) and n.startswith(re.sub(r'\D','',(country_codes.get(tara) or ''))) else n
-                    for n in numere_adaugate
-                )) if numere_adaugate else "No additional phone found."
+                text_aditional = ', '.join(sorted(_pretty_e164(n, tara) for n in numere_adaugate)) \
+                                 if numere_adaugate else "No additional phone found."
 
                 matched_name = (rezultat_valid.get("company_name_found") or "").strip() or "N/A"
                 consola.insert(tk.END, f"   🏷️ Matched Name: {matched_name}\n")
                 consola.insert(tk.END, f"   🏪 Closure Status: {closure_status}\n")
                 consola.insert(tk.END, f"   ➤ Additional phones: {text_aditional}\n")
-                consola.see(tk.END)
-                consola.update()
+                consola.see(tk.END); consola.update()
 
                 rezultate.append({
                     "Company ID": id_link,
@@ -632,13 +603,11 @@ def interfata():
         except Exception as e:
             import traceback
             consola.insert(tk.END, "❌ A apărut o eroare:\n" + traceback.format_exc() + "\n")
-            consola.see(tk.END)
-            consola.update()
+            consola.see(tk.END); consola.update()
             messagebox.showerror("Eroare", str(e))
         finally:
             consola.insert(tk.END, "ℹ️ Worker thread finished.\n")
-            consola.see(tk.END)
-            consola.update()
+            consola.see(tk.END); consola.update()
 
     def start_procesare():
         if not filepath_var.get():
@@ -652,11 +621,10 @@ def interfata():
             d = ensure_driver(consola=consola)
             if d is not None:
                 d.quit()
-        except:
+        except Exception:
             pass
         root.destroy()
 
-    # UI buttons
     tk.Button(frame, text="Load Excel File", command=incarca_fisier).pack(side=tk.LEFT, padx=5)
     tk.Button(frame, text="Start", command=start_procesare).pack(side=tk.LEFT, padx=5)
     tk.Button(frame, text="Stop", command=oprire).pack(side=tk.LEFT, padx=5)
