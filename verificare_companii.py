@@ -116,6 +116,8 @@ def normalize_with_country_code(phone: str, country: str) -> str:
 
 # === Lazy Chrome driver (prevents crash at import) ===
 driver = None
+SEARCH_COUNT = 0
+MAX_SEARCHES_PER_BROWSER = 50
 
 def ensure_driver(consola=None):
     global driver
@@ -137,6 +139,18 @@ def ensure_driver(consola=None):
             consola.insert(tk.END, "❌ " + msg + "\n"); consola.see(tk.END); consola.update()
         messagebox.showerror("Eroare Chrome", msg)
         return None
+
+def is_captcha_page(d) -> bool:
+    """Detectează pagina /sorry sau mesajul 'unusual traffic' (CAPTCHA Google)."""
+    try:
+        if "/sorry/" in d.current_url.lower():
+            return True
+        html = d.page_source.lower()
+        if "our systems have detected unusual traffic" in html:
+            return True
+        return False
+    except Exception:
+        return False
 
 # --- Consent helper + panel fallback ---
 def accept_google_consent(d):
@@ -170,6 +184,14 @@ def accept_google_consent(d):
         except Exception:
             pass
 
+def switch_to_last_window(d):
+    try:
+        handles = d.window_handles
+        if handles:
+            d.switch_to.window(handles[-1])
+    except Exception:
+        pass
+
 def find_knowledge_panel(d, timeout=7):
     wait = WebDriverWait(d, timeout)
     selectors = {
@@ -185,6 +207,8 @@ def find_knowledge_panel(d, timeout=7):
     return None
 
 def gaseste_cartela_google(query, consola=None):
+    from selenium.common.exceptions import TimeoutException
+
     d = ensure_driver(consola=consola)
     if d is None:
         return {"found": False}
@@ -193,54 +217,83 @@ def gaseste_cartela_google(query, consola=None):
     d.get(url)
     accept_google_consent(d)
 
-    # Detect “unusual traffic”
-    try:
-        page_text = d.find_element(By.TAG_NAME, "body").text[:4000].lower()
-        if "unusual traffic" in page_text or "/sorry/" in d.current_url:
+    # === CAPTCHA: restart driver + o singură reîncercare ===
+    if is_captcha_page(d):
+        if consola:
+            consola.insert(tk.END, "⚠️ Captcha detected. Restarting browser and retrying once...\n")
+            consola.see(tk.END); consola.update()
+        try:
+            d.quit()
+        except:
+            pass
+        # recreează driverul curat
+        global driver
+        driver = None
+        d = ensure_driver(consola=consola)
+        if d is None:
+            return {"found": False, "captcha": True}
+
+        d.get(url)
+        accept_google_consent(d)
+        if is_captcha_page(d):
             if consola:
-                consola.insert(tk.END, "        ⚠️ Google a cerut verificare (captcha). Sar peste.\n")
+                consola.insert(tk.END, "❌ Captcha still present after restart. Skipping this query.\n")
                 consola.see(tk.END); consola.update()
-            return {"found": False}
-    except Exception:
-        pass
+            return {"found": False, "captcha": True}
 
-    wait = WebDriverWait(d, 5)
+    wait = WebDriverWait(d, 7)
 
-    def _extract_name_from_maps():
+    def _extract_name_from_maps(d, wait, consola=None):
+        """Întoarce denumirea din profilul Maps, cu fallback pe og:title."""
         try:
-            el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1.DUwDvf")))
-            name = el.text.strip()
-            if name: return name
-        except: pass
-        try:
-            el = d.find_element(By.CSS_SELECTOR, '[role="heading"][aria-level="1"]')
-            name = el.text.strip()
-            if name: return name
-        except: pass
-        try:
-            el = d.find_element(By.CSS_SELECTOR, 'div[data-attrid="title"] span')
-            name = el.text.strip()
-            if name: return name
-        except: pass
-        try:
-            meta = d.find_element(By.CSS_SELECTOR, 'meta[property="og:title"]')
-            name = (meta.get_attribute("content") or "").strip()
-            if name: return name
-        except: pass
+            # uneori încă se încarcă; mai dăm o șansă după 0.8s
+            time.sleep(0.8)
+            # 1) încercăm H1-ul clasic
+            for sel in ["h1.DUwDvf", "[role='heading'][aria-level='1']", "div[data-attrid='title'] span"]:
+                try:
+                    el = WebDriverWait(d, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    txt = (el.text or "").strip()
+                    if txt:
+                        return txt
+                except Exception:
+                    continue
+            # 2) fallback: og:title (e foarte stabil), curățăm sufixul “ - Google Maps”
+            try:
+                meta = d.find_element(By.CSS_SELECTOR, "meta[property='og:title']")
+                name = (meta.get_attribute("content") or "").strip()
+                name = re.sub(r"\s*[-–]\s*Google Maps\s*$", "", name, flags=re.I)
+                if name:
+                    return name
+            except Exception:
+                pass
+            # 3) ultim fallback: TITLE
+            try:
+                title = (d.title or "").strip()
+                title = re.sub(r"\s*[-–]\s*Google Maps\s*$", "", title, flags=re.I)
+                # mai scapă prefixe gen “Google Maps – ” în unele localizări:
+                title = re.sub(r"^\s*Google Maps\s*[-–]\s*", "", title, flags=re.I)
+                if title:
+                    return title
+            except Exception:
+                pass
+        except Exception as e:
+            if consola:
+                consola.insert(tk.END, f"   ℹ️ Name fallback error: {e}\n"); consola.see(tk.END); consola.update()
         return "N/A"
 
+
     try:
-        panel = find_knowledge_panel(d, timeout=3)
+        panel = find_knowledge_panel(d, timeout=8)
         if not panel:
             if consola:
-                consola.insert(tk.END, "        ℹ️ Nu există knowledge panel pentru interogarea asta.\n")
+                consola.insert(tk.END, "ℹ️ Nu există knowledge panel pentru interogarea asta.\n")
                 consola.see(tk.END); consola.update()
             return {"found": False}
 
         content = panel.text
         numere = extrage_numere(content)
 
-        # --- Closure status strictly by SPANs on panel ---
+        # --- Closure status strict după <span> din panel ---
         closure_status = "Active"
         try:
             if panel.find_elements(By.XPATH, ".//span[normalize-space()='Permanently closed']"):
@@ -252,7 +305,7 @@ def gaseste_cartela_google(query, consola=None):
                     closure_status = "Permanently closed"
                 elif panel.find_elements(By.XPATH, ".//span[contains(normalize-space(.), 'Temporarily closed')]"):
                     closure_status = "Temporarily closed"
-        except Exception:
+        except:
             pass
 
         # WEBSITE
@@ -260,28 +313,26 @@ def gaseste_cartela_google(query, consola=None):
         try:
             site_elem = panel.find_element(By.XPATH, ".//a[.//span[text()='Site'] or .//span[text()='Website']]")
             website = site_elem.get_attribute("href")
-        except Exception:
+        except:
             try:
                 links = panel.find_elements(By.XPATH, ".//a[contains(@href,'http')]")
                 for a in links:
                     href = a.get_attribute("href") or ""
-                    if "facebook.com" in href: 
-                        continue
-                    if "google." in href or "support.google" in href or "/maps/" in href:
-                        continue
-                    website = href
-                    break
-            except Exception:
+                    if "facebook.com" in href: continue
+                    if "google." in href or "support.google" in href or "/maps/" in href: continue
+                    website = href; break
+            except:
                 website = None
 
         # FACEBOOK
         try:
             fb_elem = panel.find_element(By.XPATH, ".//a[contains(@href,'facebook.com')]")
             facebook = fb_elem.get_attribute("href")
-        except Exception:
+        except:
             facebook = None
 
-        # Company name via Maps (if available)
+        # Company name via Maps (dacă există link)
+        # --- Deschidere profil Maps + extragere nume robustă ---
         company_name_found = "N/A"
         opened_maps = False
         try:
@@ -290,10 +341,38 @@ def gaseste_cartela_google(query, consola=None):
                 maps_href = maps_links[0].get_attribute("href")
                 d.get(maps_href)
                 opened_maps = True
+
+                # uneori se deschide în alt tab (în practică, noi folosim d.get, dar păstrăm safety):
+                switch_to_last_window(d)
+                accept_google_consent(d)  # consent poate reapărea pe Maps
+
+                # așteptăm ca URL-ul să fie /maps/place (sau până apare og:title)
+                try:
+                    WebDriverWait(d, 4).until(lambda drv: "/maps/place" in drv.current_url or drv.find_elements(By.CSS_SELECTOR, "meta[property='og:title']"))
+                except Exception:
+                    pass
+
+                company_name_found = _extract_name_from_maps(d, wait, consola=consola)
+
+                # dacă vrei să VEZI puțin profilul, lasă 1-2 secunde aici
+                time.sleep(1.2)
+
+        except Exception as e:
+            if consola:
+                consola.insert(tk.END, f"   ℹ️ Maps open error: {e}\n"); consola.see(tk.END); consola.update()
+
+        try:
+            maps_links = panel.find_elements(By.XPATH, ".//a[contains(@href,'/maps/place/')]")
+            if maps_links:
+                maps_href = maps_links[0].get_attribute("href")
+                d.get(maps_href)
+                opened_maps = True
                 company_name_found = _extract_name_from_maps()
 
-                # also try closure on Maps if still Open
-                if closure_status == "Open":
+                time.sleep(1)
+
+                # verifică și pe Maps statusul de închidere
+                if closure_status == "Active":
                     try:
                         if d.find_elements(By.XPATH, "//span[normalize-space()='Permanently closed']"):
                             closure_status = "Permanently closed"
@@ -303,20 +382,20 @@ def gaseste_cartela_google(query, consola=None):
                             closure_status = "Permanently closed"
                         elif d.find_elements(By.XPATH, "//span[contains(normalize-space(.), 'Temporarily closed')]"):
                             closure_status = "Temporarily closed"
-                    except Exception:
+                    except:
                         pass
-        except Exception:
+        except:
             pass
 
         if company_name_found == "N/A" and not opened_maps:
             try:
                 el = panel.find_element(By.CSS_SELECTOR, '[role="heading"]')
                 company_name_found = el.text.strip() or "N/A"
-            except Exception:
+            except:
                 try:
                     el = panel.find_element(By.CSS_SELECTOR, "div[data-attrid='title'] span")
                     company_name_found = el.text.strip() or "N/A"
-                except Exception:
+                except:
                     company_name_found = "N/A"
 
         if opened_maps:
@@ -324,7 +403,7 @@ def gaseste_cartela_google(query, consola=None):
             accept_google_consent(d)
             try:
                 find_knowledge_panel(d, timeout=8)
-            except Exception:
+            except:
                 pass
 
         return {
@@ -490,9 +569,7 @@ def interfata():
 
                 variante_cautare = [
                     f"{companie} {adresa} {zip_code} {city} {tara}",
-                    f"{companie} {adresa}",
-                    f"{companie} {city}",
-                    f"{companie} {tara}"
+                    f"{companie} {city} {tara}",
                 ]
                 rezultat_valid = None
 
