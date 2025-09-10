@@ -333,12 +333,12 @@ def ensure_driver(consola=None):
         driver = uc.Chrome(options=options)
         return driver
     except Exception as e:
-        msg = f"Nu pot porni browserul: {e}"
+        msg = f"The browser can not be opened: {e}"
         if consola:
             consola.insert(tk.END, "❌ " + msg + "\n")
             consola.see(tk.END)
             consola.update()
-        messagebox.showerror("Eroare Chrome", msg)
+        messagebox.showerror("Chrome error", msg)
         return None
 
 def gaseste_cartela_google(query, consola=None):
@@ -378,7 +378,7 @@ def gaseste_cartela_google(query, consola=None):
         panel = find_knowledge_panel(d, timeout=3)
         if not panel:
             if consola:
-                consola.insert(tk.END, "ℹ️ Nu există knowledge panel.\n")
+                consola.insert(tk.END, "ℹ️ Google card does not exist.\n")
                 consola.see(tk.END); consola.update()
             return {"found": False}
 
@@ -459,7 +459,7 @@ def gaseste_cartela_google(query, consola=None):
 
     except Exception as e:
         if consola:
-            consola.insert(tk.END, f"❌ Eroare la citirea panelului: {type(e).__name__}\n")
+            consola.insert(tk.END, f"❌ Error reading the Google Card: {type(e).__name__}\n")
             consola.see(tk.END); consola.update()
         return {"found": False}
 
@@ -563,8 +563,8 @@ def interfata():
     # if phone codes failed to load, show an error but allow UI to open
     if not country_codes:
         messagebox.showerror("Eroare",
-            "Nu pot încărca all_country_phone_codes.json.\n"
-            "Verifică fișierul și repornește aplicația.")
+            "all_country_phone_codes.json can not be loaded.\n"
+            "Check the file and restart the application.")
     # Console
     global consola
     consola = scrolledtext.ScrolledText(root, width=120, height=30)
@@ -592,6 +592,9 @@ def interfata():
         try:
             df = pd.read_excel(filepath)
             rezultate = []
+
+            backup_interval = 5   # salvează la fiecare 5 companii
+            counter = 0
 
             for idx, (_, row) in enumerate(df.iterrows(), start=1):
                 if stop_flag.get():
@@ -740,6 +743,15 @@ def interfata():
                     "Closure Status": closure_status
                 })
 
+                counter += 1
+                if counter % backup_interval == 0:
+                    # Suprascrie backup-ul la fiecare 5 companii
+                    rezultat_df = pd.DataFrame(rezultate)
+                    rezultat_df.to_excel("rezultate_companii_backup.xlsx", index=False)
+                    consola.insert(tk.END, f"💾 Backup has been overwrited after {counter} companies.\n")
+                    consola.see(tk.END)
+                    consola.update()
+
             rezultat_df = pd.DataFrame(rezultate)
             saved_path = save_dataframe_safely(rezultat_df, "rezultate_companii.xlsx", consola=consola)
 
@@ -753,10 +765,10 @@ def interfata():
                 messagebox.showerror("Save failed", "Processing finished, but the Excel file could not be saved.\nTry closing any open Excel files and run again.")
         except Exception as e:
             import traceback
-            consola.insert(tk.END, "❌ A apărut o eroare:\n" + traceback.format_exc() + "\n")
+            consola.insert(tk.END, "❌ An error appered:\n" + traceback.format_exc() + "\n")
             consola.see(tk.END)
             consola.update()
-            messagebox.showerror("Eroare", str(e))
+            messagebox.showerror("Error", str(e))
         finally:
             consola.insert(tk.END, "ℹ️ Worker thread finished.\n")
             consola.see(tk.END)
