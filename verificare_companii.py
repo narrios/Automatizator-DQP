@@ -20,6 +20,9 @@ except Exception as e:
     country_codes = {}
     # vom afișa eroarea în UI la start
 
+# Domenii care trebuie ignorate
+EXCLUDED_DOMAINS = ["wikipedia.org", "yelp.com", "linkedin.com", "youtube.com", "wa.me", "whatsapp.com"]
+
 # === Phone patterns and helpers ===
 PHONE_TEXT_RE = re.compile(r'\+?\d[\d\s\-\.\(\)\/]{6,}\d')
 PHONE_TEL_RE  = re.compile(r'href=["\']\s*tel:([+0-9\-\s\.\(\)\/]+)["\']', re.I)
@@ -96,6 +99,8 @@ SUSPECT_PATTERN_RE = re.compile(
     )
     """
 )
+
+ZIP_CODE_RE = re.compile(r"^\d{4}-\d{3}$|^\d{5}-\d{4}$")
 
 def accept_google_consent(d):
     """Închide dialogul de consimțământ Google (cookies/terms), dacă apare."""
@@ -272,6 +277,10 @@ def extrage_numere(text: str):
         if dcnt < 7 or dcnt > 15:
             continue
 
+        # ⚠️ Excludem codurile poștale
+        if ZIP_CODE_RE.match(raw):
+            continue
+
         # context ~ 50 chars around the match
         start, end = m.start(), m.end()
         left = max(0, start - 50)
@@ -399,15 +408,23 @@ def gaseste_cartela_google(query, consola=None):
         website = None
         try:
             site_elem = panel.find_element(By.XPATH, ".//a[.//span[text()='Site'] or .//span[text()='Website']]")
-            website = site_elem.get_attribute("href")
+            candidate = site_elem.get_attribute("href")
+            if candidate and not any(dom in candidate.lower() for dom in EXCLUDED_DOMAINS):
+                website = candidate
         except:
             try:
                 links = panel.find_elements(By.XPATH, ".//a[contains(@href,'http')]")
-                for a in links:
+                for a in links:   # ← aici intrăm în buclă, deci putem folosi continue
                     href = a.get_attribute("href") or ""
-                    if "facebook.com" in href: continue
-                    if "google." in href or "support.google" in href or "/maps/" in href: continue
-                    website = href; break
+                    href_l = href.lower()
+                    if ("facebook.com" in href_l or 
+                        "google." in href_l or 
+                        "support.google" in href_l or 
+                        "/maps/" in href_l or 
+                        any(dom in href_l for dom in EXCLUDED_DOMAINS)):
+                        continue
+                    website = href
+                    break
             except:
                 website = None
 
