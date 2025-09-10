@@ -149,41 +149,6 @@ def is_captcha_page(d) -> bool:
     except Exception:
         return False
 
-def accept_google_consent(d):
-    """Închide dialogul de consimțământ Google (cookies/terms), dacă apare."""
-    try:
-        time.sleep(0.5)
-        # dacă e într-un iframe de consimțământ
-        iframes = d.find_elements(By.CSS_SELECTOR, "iframe[src*='consent']")
-        if iframes:
-            d.switch_to.frame(iframes[0])
-
-        # butoane uzuale pe diverse limbi
-        xpaths = [
-            "//button[@id='L2AGLb']",
-            "//button[normalize-space()='I agree']",
-            "//button[contains(., 'Accept all')]",
-            "//button[contains(., 'Sunt de acord')]",
-            "//button[contains(., 'Acceptă tot')]",
-            "//button[contains(., 'Ich stimme zu')]",
-            "//button[contains(., 'Aceptar todo')]",
-        ]
-        for xp in xpaths:
-            btns = d.find_elements(By.XPATH, xp)
-            if btns:
-                try:
-                    btns[0].click()
-                except:
-                    d.execute_script("arguments[0].click();", btns[0])
-                break
-    except Exception:
-        pass
-    finally:
-        try:
-            d.switch_to.default_content()
-        except Exception:
-            pass
-
 def find_knowledge_panel(d, timeout=6):
     """Caută și returnează elementul knowledge panel din dreapta (SERP)."""
     wait = WebDriverWait(d, timeout)
@@ -198,6 +163,13 @@ def find_knowledge_panel(d, timeout=6):
         except:
             continue
     return None
+
+# Afișare frumoasă (cu + dacă e nevoie)
+def pretty_format(n, tara):
+    """Afișează numărul cu + dacă are prefixul corect de țară"""
+    prefix_digits = re.sub(r'\D', '', (country_codes.get(tara) or ''))
+    return ('+' + n) if prefix_digits and n.startswith(prefix_digits) else n
+
 
 def switch_to_last_window(d):
     """Comută pe ultimul tab/fereastră deschisă în driver."""
@@ -695,13 +667,20 @@ def interfata():
                 # Collect phones from all sources (Google card + site + Facebook), normalized for dedup
                 toate_numerele = set()
 
-                # Google phones
-                google_phones_raw = sorted(set(rezultat_valid.get("phones", [])))
-                telefoane_google = ', '.join(google_phones_raw) if google_phones_raw else "N/A"
-                toate_numerele.update(
-                    n for n in (normalize_with_country_code(p, tara) for p in google_phones_raw)
+                # Normalizează și dedup
+                google_norm = set(
+                    n for n in (normalize_with_country_code(p, tara) for p in rezultat_valid.get("phones", []))
                     if n
                 )
+
+                # Afișare curată (o singură dată fiecare număr)
+                if google_norm:
+                    telefoane_google = ', '.join(sorted(pretty_format(n, tara) for n in google_norm))
+                else:
+                    telefoane_google = "N/A"
+
+                toate_numerele.update(google_norm)
+
 
                 site = rezultat_valid.get("site")
                 facebook = rezultat_valid.get("facebook")
@@ -711,21 +690,25 @@ def interfata():
                 if site:
                     site_nums_raw = extrage_numere_de_pe_pagina(site, consola=consola)
                     if site_nums_raw:
-                        telefoane_site = ', '.join(sorted(set(site_nums_raw)))
-                        toate_numerele.update(
+                        site_norm = set(
                             n for n in (normalize_with_country_code(x, tara) for x in site_nums_raw)
                             if n
                         )
+                        telefoane_site = ', '.join(sorted(pretty_format(n, tara) for n in site_norm))
+                        toate_numerele.update(site_norm)
+
 
                 telefoane_fb = "N/A"
                 if facebook:
                     fb_nums_raw = extrage_numere_de_pe_pagina(facebook, consola=consola)
                     if fb_nums_raw:
-                        telefoane_fb = ', '.join(sorted(set(fb_nums_raw)))
-                        toate_numerele.update(
+                        fb_norm = set(
                             n for n in (normalize_with_country_code(x, tara) for x in fb_nums_raw)
                             if n
                         )
+                        telefoane_fb = ', '.join(sorted(pretty_format(n, tara) for n in fb_norm))
+                        toate_numerele.update(fb_norm)
+
 
                 # Numbers from employee note (normalize too)
                 numere_nota = set(
@@ -735,10 +718,12 @@ def interfata():
 
                 # Additional = all found - already present - from note
                 numere_adaugate = toate_numerele - phones_initiale - numere_nota
-                text_aditional = ', '.join(sorted(
-                    ('+' + n) if re.sub(r'\D', '', (country_codes.get(tara) or '')) and n.startswith(re.sub(r'\D','',(country_codes.get(tara) or ''))) else n
-                    for n in numere_adaugate
-                )) if numere_adaugate else "No additional phone found."
+                
+                if numere_adaugate:
+                    text_aditional = ', '.join(sorted(pretty_format(n, tara) for n in numere_adaugate))
+                else:
+                    text_aditional = "No additional phone found."
+
 
                 matched_name = (rezultat_valid.get("company_name_found") or "").strip() or "N/A"
                 consola.insert(tk.END, f"   🏷️ Matched Name: {matched_name}\n")
