@@ -9,8 +9,10 @@ import time
 import threading
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # === Load country phone codes safely ===
 try:
@@ -20,6 +22,7 @@ except Exception as e:
     country_rules  = {}
     # vom afișa eroarea în UI la start
 
+"""Configuration and helper functions for verificare_companii.py"""
 # Domenii care trebuie ignorate
 EXCLUDED_DOMAINS = ["wikipedia.org", "yelp.com", "linkedin.com", "youtube.com", "wa.me", "whatsapp.com"]
 
@@ -102,6 +105,78 @@ SUSPECT_PATTERN_RE = re.compile(
 
 ZIP_CODE_RE = re.compile(r"^\d{4}-\d{3}$|^\d{5}-\d{4}$")
 
+"""=== Selenium / undetected-chromedriver helpers ==="""
+
+# === Lazy Chrome driver (prevents crash at import) ===
+driver = None  # will be created on-demand
+
+def ensure_driver(consola=None):
+    global driver
+    if driver is not None:
+        return driver
+    try:
+        options = uc.ChromeOptions()
+        options.page_load_strategy = "none"   # "none" dacă vrei și mai agresiv + wait-uri proprii
+        options.add_argument("--lang=en")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-first-run")
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame,HeavyAdIntervention")
+        #options.add_argument("--headless")
+        
+        driver = uc.Chrome(options=options, use_subprocess=True)
+        driver.set_page_load_timeout(4)   # timeout pentru driver.get()
+        driver.implicitly_wait(0)         # fără așteptare implicită
+        driver.set_script_timeout(8)
+        return driver
+        
+    except Exception as e:
+        msg = f"The browser can not be opened: {e}"
+        if consola:
+            consola.insert(tk.END, "❌ " + msg + "\n")
+            consola.see(tk.END)
+            consola.update()
+        messagebox.showerror("Chrome error", msg)
+        return None
+
+def safe_get(driver, url, attempts=2, load_stop_after=8):
+    last_exc = None
+    for i in range(attempts):
+        try:
+            driver.get(url)
+            # dacă ai page_load_strategy="none": fă un mic sleep + window.stop()
+            if load_stop_after and i == 0:
+                time.sleep(load_stop_after)
+                try:
+                    driver.execute_script("window.stop();")
+                except Exception:
+                    pass
+            return True
+        except TimeoutException as e:
+            # oprește încărcarea și continuă
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            last_exc = e
+            # dacă DOM nu a apucat să se încarce deloc, mai încearcă odată
+        except WebDriverException as e:
+            last_exc = e
+            # la erori de conexiune cu localhost (ReadTimeout) restart driverul
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            driver = ensure_driver()
+    # dacă tot pică:
+    raise last_exc
+
 def accept_google_consent(d):
     """Închide dialogul de consimțământ Google (cookies/terms), dacă apare."""
     try:
@@ -179,6 +254,8 @@ def switch_to_last_window(d):
             d.switch_to.window(handles[-1])
     except Exception:
         pass
+
+"""Main functions"""
 
 def _extract_name_from_maps(d, wait, consola=None):
         try:
@@ -314,31 +391,6 @@ def normalize_with_country_code(phone: str, country: str) -> str:
 
     return digits
 
-# === Lazy Chrome driver (prevents crash at import) ===
-driver = None  # will be created on-demand
-
-def ensure_driver(consola=None):
-    global driver
-    if driver is not None:
-        return driver
-    try:
-        options = uc.ChromeOptions()
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--lang=en")
-        options.add_argument("--window-size=1920,1080")
-        #options.add_argument("--headless")
-        driver = uc.Chrome(options=options)
-        return driver
-    except Exception as e:
-        msg = f"The browser can not be opened: {e}"
-        if consola:
-            consola.insert(tk.END, "❌ " + msg + "\n")
-            consola.see(tk.END)
-            consola.update()
-        messagebox.showerror("Chrome error", msg)
-        return None
-
 def gaseste_cartela_google(query, tara, consola=None):
     global driver
 
@@ -347,7 +399,7 @@ def gaseste_cartela_google(query, tara, consola=None):
         return {"found": False}
 
     url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-    d.get(url)
+    safe_get(driver, url, attempts=2)
     accept_google_consent(d)
 
     # captcha handling
@@ -430,7 +482,7 @@ def gaseste_cartela_google(query, tara, consola=None):
             maps_links = panel.find_elements(By.XPATH, ".//a[contains(@href,'/maps/place/')]")
             if maps_links:
                 maps_href = maps_links[0].get_attribute("href")
-                d.get(maps_href)
+                safe_get(driver, maps_href, attempts=2)
                 switch_to_last_window(d)
                 accept_google_consent(d)
 
