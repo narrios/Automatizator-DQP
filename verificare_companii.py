@@ -14,10 +14,10 @@ from selenium.webdriver.support import expected_conditions as EC
 
 # === Load country phone codes safely ===
 try:
-    with open("all_country_phone_codes.json", "r", encoding="utf-8") as f:
-        country_codes = json.load(f)
+    with open("all_country_phone_rules.json", "r", encoding="utf-8") as f:
+        country_rules  = json.load(f)
 except Exception as e:
-    country_codes = {}
+    country_rules  = {}
     # vom afișa eroarea în UI la start
 
 # Domenii care trebuie ignorate
@@ -167,7 +167,7 @@ def find_knowledge_panel(d, timeout=6):
 # Afișare frumoasă (cu + dacă e nevoie)
 def pretty_format(n, tara):
     """Afișează numărul cu + dacă are prefixul corect de țară"""
-    prefix_digits = re.sub(r'\D', '', (country_codes.get(tara) or ''))
+    prefix_digits = re.sub(r'\D', '', (country_rules.get(tara, {}).get("code", "")))
     return ('+' + n) if prefix_digits and n.startswith(prefix_digits) else n
 
 
@@ -231,7 +231,7 @@ def _cleanup_phone_str(s: str) -> str:
 def _digits_count(s: str) -> int:
     return len(re.sub(r'\D', '', s or ''))
 
-def extrage_numere(text: str):
+def extrage_numere(text: str, country: str = None):
     """
     Extract phone-like strings from visible text, excluding
     tax IDs / banking refs / GDPR refs in the nearby context.
@@ -243,10 +243,27 @@ def extrage_numere(text: str):
     pattern = re.compile(r'\+?\d[\d\-\s\.\(\)\/]{6,}\d')
     results = []
 
+    min_len, max_len = (7, 15)
+    if country and country in country_rules:
+        min_len = country_rules[country].get("min_length", 7)
+        max_len = country_rules[country].get("max_length", 15)
+
     for m in pattern.finditer(text):
         raw = m.group(0).strip()
-        dcnt = _digits_count(raw)
-        if dcnt < 7 or dcnt > 15:
+        cleaned = _cleanup_phone_str(raw)
+        digits = re.sub(r'\D', '', cleaned)
+
+        # Obținem prefixul pentru țară
+        prefix = re.sub(r'\D', '', country_rules.get(country, {}).get("code", ""))
+
+        # Scoatem prefixul dacă există
+        if prefix and digits.startswith(prefix):
+            national = digits[len(prefix):]
+        else:
+            national = digits
+
+        dcnt = len(national)
+        if dcnt < min_len or dcnt > max_len:
             continue
 
         # ⚠️ Excludem codurile poștale
@@ -279,7 +296,7 @@ def normalize_with_country_code(phone: str, country: str) -> str:
     if not digits:
         return ''
 
-    prefix = country_codes.get(country) or ''
+    prefix = country_rules.get(country, {}).get("code", "")
     prefix_digits = re.sub(r'\D', '', prefix)
 
     # 00 + country code
@@ -322,7 +339,7 @@ def ensure_driver(consola=None):
         messagebox.showerror("Chrome error", msg)
         return None
 
-def gaseste_cartela_google(query, consola=None):
+def gaseste_cartela_google(query, tara, consola=None):
     global driver
 
     d = ensure_driver(consola=consola)
@@ -359,12 +376,12 @@ def gaseste_cartela_google(query, consola=None):
         panel = find_knowledge_panel(d, timeout=3)
         if not panel:
             if consola:
-                consola.insert(tk.END, "ℹ️ Google card does not exist.\n")
+                consola.insert(tk.END, "            ℹ️ Google card does not exist.\n")
                 consola.see(tk.END); consola.update()
             return {"found": False}
 
         content = panel.text
-        numere = extrage_numere(content)
+        numere = extrage_numere(content, country = tara)
 
         # Closure status
         closure_status = "Active"
@@ -452,7 +469,7 @@ def gaseste_cartela_google(query, consola=None):
             consola.see(tk.END); consola.update()
         return {"found": False}
 
-def extrage_numere_de_pe_pagina(url, consola=None):
+def extrage_numere_de_pe_pagina(url, tara, consola=None):
     d = ensure_driver(consola=consola)
     if d is None:
         return []
@@ -471,7 +488,7 @@ def extrage_numere_de_pe_pagina(url, consola=None):
 
         nums = set()
         # 1) from visible text (context-filtered)
-        for m in extrage_numere(text):
+        for m in extrage_numere(text, country=tara):
             nums.add(_cleanup_phone_str(m))
         # 2) from tel: hrefs (length/suspect filters only)
         for m in PHONE_TEL_RE.findall(html):
@@ -550,9 +567,9 @@ def interfata():
     stop_flag = tk.BooleanVar(value=False)
 
     # if phone codes failed to load, show an error but allow UI to open
-    if not country_codes:
+    if not country_rules :
         messagebox.showerror("Eroare",
-            "all_country_phone_codes.json can not be loaded.\n"
+            "all_country_phone_rules.json can not be loaded.\n"
             "Check the file and restart the application.")
     # Console
     global consola
@@ -572,10 +589,6 @@ def interfata():
         consola.insert(tk.END, "🛑 Stop requested. Finishing current company...\n")
         consola.see(tk.END)
         consola.update()
-
-    def _pretty_e164(n: str, country: str) -> str:
-        prefix_digits = re.sub(r'\D', '', (country_codes.get(country) or ''))
-        return ('+' + n) if prefix_digits and n.startswith(prefix_digits) else n
 
     def proceseaza_fisier(filepath, consola, stop_flag):
         try:
@@ -628,7 +641,7 @@ def interfata():
                     consola.insert(tk.END, f"   🔍 Searching: {query}\n")
                     consola.see(tk.END)
                     consola.update()
-                    rezultat = gaseste_cartela_google(query, consola=consola)
+                    rezultat = gaseste_cartela_google(query, tara, consola=consola)
                     if not rezultat.get("found"):
                         continue
 
@@ -636,10 +649,6 @@ def interfata():
                         n for n in (normalize_with_country_code(p, tara) for p in rezultat.get("phones", []))
                         if n
                     )
-
-                    rezultat = gaseste_cartela_google(query, consola=consola)
-                    if not rezultat.get("found"):
-                        continue
 
                     consola.insert(tk.END, "   ✅ Google card found\n")
                     consola.see(tk.END); consola.update()
@@ -686,9 +695,28 @@ def interfata():
                 facebook = rezultat_valid.get("facebook")
                 closure_status = rezultat_valid.get("closure_status", "N/A")
 
+                if closure_status == "Permanently closed":
+                    consola.insert(tk.END, "   🛑 Company is permanently closed. Skipping detailed checks.\n")
+                    consola.see(tk.END); consola.update()
+
+                    rezultate.append({
+                        "Company ID": id_link,
+                        "Company Name": companie,
+                        "Initial Phones": phone_col,
+                        "Matched Company Name": rezultat_valid.get("company_name_found", "N/A"),
+                        "Unique Phones Found": "N/A",
+                        "Google Phone(s)": ", ".join(set(rezultat_valid.get("phones", []))) or "N/A",
+                        "Facebook Phone(s)": "N/A",
+                        "Website Phone(s)": "N/A",
+                        "Closure Status": closure_status,
+                        "DQP Employee Note": nota  # dacă vrei să transferi și coloana asta
+                    })
+                    continue
+
+
                 telefoane_site = "N/A"
                 if site:
-                    site_nums_raw = extrage_numere_de_pe_pagina(site, consola=consola)
+                    site_nums_raw = extrage_numere_de_pe_pagina(site, tara, consola=consola)
                     if site_nums_raw:
                         site_norm = set(
                             n for n in (normalize_with_country_code(x, tara) for x in site_nums_raw)
@@ -700,7 +728,7 @@ def interfata():
 
                 telefoane_fb = "N/A"
                 if facebook:
-                    fb_nums_raw = extrage_numere_de_pe_pagina(facebook, consola=consola)
+                    fb_nums_raw = extrage_numere_de_pe_pagina(facebook, tara, consola=consola)
                     if fb_nums_raw:
                         fb_norm = set(
                             n for n in (normalize_with_country_code(x, tara) for x in fb_nums_raw)
@@ -712,7 +740,7 @@ def interfata():
 
                 # Numbers from employee note (normalize too)
                 numere_nota = set(
-                    n for n in (normalize_with_country_code(x, tara) for x in extrage_numere(nota))
+                    n for n in (normalize_with_country_code(x, tara) for x in extrage_numere(nota, country=tara))
                     if n
                 )
 
