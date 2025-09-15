@@ -444,6 +444,11 @@
     "min_length": 7,
     "max_length": 15
   },
+  "Kosovo": {
+    "code": "+383",
+    "min_length": 8,
+    "max_length": 8  
+  },
   "Kuwait": {
     "code": "+965",
     "min_length": 7,

@@ -145,7 +145,7 @@ def ensure_driver(consola=None):
         messagebox.showerror("Chrome error", msg)
         return None
 
-def safe_get(driver, url, attempts=2, load_stop_after=8):
+def safe_get(driver, url, attempts=2, load_stop_after=3):
     last_exc = None
     for i in range(attempts):
         try:
@@ -224,7 +224,7 @@ def is_captcha_page(d) -> bool:
     except Exception:
         return False
 
-def find_knowledge_panel(d, timeout=6):
+def find_knowledge_panel(d, timeout=3):
     """Caută și returnează elementul knowledge panel din dreapta (SERP)."""
     wait = WebDriverWait(d, timeout)
     selectors = [
@@ -319,11 +319,9 @@ def extrage_numere(text: str, country: str = None):
 
     pattern = re.compile(r'\+?\d[\d\-\s\.\(\)\/]{6,}\d')
     results = []
-
-    min_len, max_len = (7, 15)
-    if country and country in country_rules:
-        min_len = country_rules[country].get("min_length", 7)
-        max_len = country_rules[country].get("max_length", 15)
+    
+    rules = country_rules.get(country, {})
+    prefix = re.sub(r'\D', '', rules.get("code", ""))
 
     for m in pattern.finditer(text):
         raw = m.group(0).strip()
@@ -339,8 +337,7 @@ def extrage_numere(text: str, country: str = None):
         else:
             national = digits
 
-        dcnt = len(national)
-        if dcnt < min_len or dcnt > max_len:
+        if not is_valid_length(national, country):
             continue
 
         # ⚠️ Excludem codurile poștale
@@ -386,10 +383,24 @@ def normalize_with_country_code(phone: str, country: str) -> str:
 
     # local/lacking country code -> prepend, drop trunk '0'
     if prefix_digits:
-        local = digits.lstrip('0')
+        if country.lower() in ["italy", "italia", "italie", "italien", "italienă", "italiana"]:    
+            local = digits
+        else:    
+            local = digits.lstrip('0')        
         return prefix_digits + local
-
+    
     return digits
+
+def is_valid_length(num: str, country: str) -> bool:
+    """Verifică dacă lungimea numărului corespunde regulilor pentru țara dată."""
+    digits = _digits_count(num)
+    rules = country_rules.get(country.lower())  # country_rules încărcat din all_country_phone_rules.json
+    if rules:
+        min_len = rules.get("min_length", 7)
+        max_len = rules.get("max_length", 15)
+        return min_len <= digits <= max_len
+    # fallback generic
+    return 7 <= digits <= 15
 
 def gaseste_cartela_google(query, tara, consola=None):
     global driver
@@ -398,8 +409,8 @@ def gaseste_cartela_google(query, tara, consola=None):
     if d is None:
         return {"found": False}
 
-    url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-    safe_get(driver, url, attempts=2)
+    url = f"https://www.google.com/search?q={query.replace(' ', '+')}&hl=en"
+    safe_get(d, url, attempts=2)
     accept_google_consent(d)
 
     # captcha handling
@@ -422,13 +433,18 @@ def gaseste_cartela_google(query, tara, consola=None):
                 consola.see(tk.END); consola.update()
             return {"found": False, "captcha": True}
 
-    wait = WebDriverWait(d, 6)
+    wait = WebDriverWait(d, 3)
+
+    website = None
+    facebook = None
+    company_name_found = "N/A"
+    closure_status = "N/A"
 
     try:
         panel = find_knowledge_panel(d, timeout=3)
         if not panel:
             if consola:
-                consola.insert(tk.END, "            ℹ️ Google card does not exist.\n")
+                consola.insert(tk.END, "        ℹ️ Google card does not exist.\n")
                 consola.see(tk.END); consola.update()
             return {"found": False}
 
@@ -444,14 +460,26 @@ def gaseste_cartela_google(query, tara, consola=None):
                 closure_status = "Temporarily closed"
         except:
             pass
+        
+        # Address
+        address = "N/A"
+        try:
+            addr_elem = panel.find_element(By.XPATH, ".//div[contains(@data-attrid,'kc:/location/location:address')]")
+            address = addr_elem.text.strip()
+        except:
+            try:
+                addr_elem = panel.find_element(By.XPATH, ".//span[contains(@class,'LrzXr')]")                
+                address = addr_elem.text.strip()
+            except:
+                pass
 
         # Website
-        website = None
         try:
             site_elem = panel.find_element(By.XPATH, ".//a[.//span[text()='Site'] or .//span[text()='Website']]")
             candidate = site_elem.get_attribute("href")
             if candidate and not any(dom in candidate.lower() for dom in EXCLUDED_DOMAINS):
                 website = candidate
+                time.sleep(1)  # mic delay să nu pară robot
         except:
             try:
                 links = panel.find_elements(By.XPATH, ".//a[contains(@href,'http')]")
@@ -467,14 +495,17 @@ def gaseste_cartela_google(query, tara, consola=None):
                     website = href
                     break
             except:
-                website = None
+                pass
 
         # Facebook
         try:
-            fb_elem = panel.find_element(By.XPATH, ".//a[contains(@href,'facebook.com')]")
-            facebook = fb_elem.get_attribute("href")
+            for a in panel.find_elements(By.XPATH, ".//a[contains(@href,'facebook.com')]"):
+                href = a.get_attribute("href") or ""
+                if href and "facebook.com" in href and not href.endswith("sharer.php"):
+                    facebook = href
+                    break
         except:
-            facebook = None
+            pass
 
         # Google Maps profile
         company_name_found = "N/A"
@@ -482,7 +513,7 @@ def gaseste_cartela_google(query, tara, consola=None):
             maps_links = panel.find_elements(By.XPATH, ".//a[contains(@href,'/maps/place/')]")
             if maps_links:
                 maps_href = maps_links[0].get_attribute("href")
-                safe_get(driver, maps_href, attempts=2)
+                safe_get(d, maps_href, attempts=2)
                 switch_to_last_window(d)
                 accept_google_consent(d)
 
@@ -512,6 +543,7 @@ def gaseste_cartela_google(query, tara, consola=None):
             "facebook": facebook,
             "phones": numere,
             "company_name_found": company_name_found,
+            "address": address,
             "closure_status": closure_status
         }
 
@@ -529,7 +561,17 @@ def extrage_numere_de_pe_pagina(url, tara, consola=None):
         d.get(url)
         # small scroll to load footer/lazy content
         time.sleep(1.5)
-        d.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        try:
+            d.execute_script("""
+                if(document.body) {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }                 
+            """)
+        except Exception as e:
+            if consola:
+                consola.insert(tk.END, f"   ❌ Scroll error: {e}\n")
+                consola.see(tk.END)
+                consola.update()
         time.sleep(1.0)
 
         html = d.page_source
@@ -541,11 +583,12 @@ def extrage_numere_de_pe_pagina(url, tara, consola=None):
         nums = set()
         # 1) from visible text (context-filtered)
         for m in extrage_numere(text, country=tara):
-            nums.add(_cleanup_phone_str(m))
+            if is_valid_length(m, tara):
+                nums.add(_cleanup_phone_str(m))
         # 2) from tel: hrefs (length/suspect filters only)
         for m in PHONE_TEL_RE.findall(html):
             candidate = _cleanup_phone_str(m)
-            if 7 <= _digits_count(candidate) <= 15 and not SUSPECT_PATTERN_RE.search(candidate):
+            if is_valid_length(candidate, tara) and not SUSPECT_PATTERN_RE.search(candidate):
                 nums.add(candidate)
 
         return list(nums)
@@ -648,7 +691,6 @@ def interfata():
             rezultate = []
 
             backup_interval = 5   # salvează la fiecare 5 companii
-            counter = 0
 
             for idx, (_, row) in enumerate(df.iterrows(), start=1):
                 if stop_flag.get():
@@ -714,9 +756,11 @@ def interfata():
                     rezultate.append({
                         "Company ID": id_link,
                         "Company Name": companie,
+                        "Country": tara,
                         "Initial Phones": phone_col,
                         "DQP Employee Note": nota,
                         "Matched Company Name": "N/A",
+                        "Google Address": "N/A",
                         "Unique Phones Found": "Google card not found",
                         "Google Phone(s)": "N/A",
                         "Facebook Phone(s)": "N/A",
@@ -754,8 +798,10 @@ def interfata():
                     rezultate.append({
                         "Company ID": id_link,
                         "Company Name": companie,
+                        "Country": tara,
                         "Initial Phones": phone_col,
                         "Matched Company Name": rezultat_valid.get("company_name_found", "N/A"),
+                        "Google Address": rezultat_valid.get("address", "N/A"),
                         "Unique Phones Found": "N/A",
                         "Google Phone(s)": ", ".join(set(rezultat_valid.get("phones", []))) or "N/A",
                         "Facebook Phone(s)": "N/A",
@@ -815,9 +861,11 @@ def interfata():
                 rezultate.append({
                     "Company ID": id_link,
                     "Company Name": companie,
+                    "Country": tara,
                     "Initial Phones": phone_col,
                     "DQP Employee Note": nota,
                     "Matched Company Name": matched_name,
+                    "Google Address": rezultat_valid.get("address", "N/A"),
                     "Unique Phones Found": text_aditional,
                     "Google Phone(s)": telefoane_google,
                     "Facebook Phone(s)": telefoane_fb,
@@ -825,17 +873,17 @@ def interfata():
                     "Closure Status": closure_status
                 })
 
-                counter += 1
-                if counter % backup_interval == 0:
+                if idx % backup_interval == 0:
                     # Suprascrie backup-ul la fiecare 5 companii
                     rezultat_df = pd.DataFrame(rezultate)
                     rezultat_df.to_excel("rezultate_companii_backup.xlsx", index=False)
-                    consola.insert(tk.END, f"💾 Backup has been overwrited after {counter} companies.\n")
+                    consola.insert(tk.END, f"💾 Backup has been overwrited after {idx} companies.\n")
                     consola.see(tk.END)
                     consola.update()
 
             rezultat_df = pd.DataFrame(rezultate)
-            saved_path = save_dataframe_safely(rezultat_df, "rezultate_companii.xlsx", consola=consola)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved_path = save_dataframe_safely(rezultat_df, f"rezultate_companii_{timestamp}.xlsx", consola=consola)
 
             if saved_path:
                 consola.insert(tk.END, f"\n✅ Done. Results saved to:\n{saved_path}\n")
